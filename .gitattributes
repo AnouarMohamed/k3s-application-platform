@@ -1,0 +1,3 @@
+# YAML manifests are a primary deliverable of this infrastructure repository.
+*.yml linguist-language=YAML linguist-detectable=true -linguist-documentation
+*.yaml linguist-language=YAML linguist-detectable=true -linguist-documentation
