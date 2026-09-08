@@ -1,0 +1,272 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: passbolt-db
+  namespace: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: passbolt-db
+  namespace: data
+  labels:
+    app.kubernetes.io/name: passbolt-db
+    app.kubernetes.io/part-of: k3s-application-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: passbolt-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: passbolt-db
+        app.kubernetes.io/part-of: k3s-application-platform
+    spec:
+      serviceAccountName: passbolt-db
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mariadb
+          # Version and digest are pinned so a redeploy always pulls the same image.
+          image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 3306
+              name: mysql
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: MYSQL_DATABASE
+              value: passbolt
+            - name: MYSQL_USER
+              value: passbolt
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: passbolt-secret
+                  key: PASSBOLT_DB_PASSWORD
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: passbolt-secret
+                  key: PASSBOLT_DB_ROOT_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 90
+            periodSeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: passbolt-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: passbolt-db
+  namespace: data
+spec:
+  selector:
+    app.kubernetes.io/name: passbolt-db
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: passbolt-gpg
+  namespace: apps
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: passbolt-jwt
+  namespace: apps
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: passbolt
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: passbolt
+    app.kubernetes.io/part-of: k3s-application-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: passbolt
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: passbolt
+        app.kubernetes.io/part-of: k3s-application-platform
+    spec:
+      serviceAccountName: passbolt
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: passbolt
+          image: passbolt/passbolt:5.13.0-1-ce-non-root@sha256:aa5641bf62812b05c59c908f86fe40f7dbb3eda04bb7ec8a97254457414af041
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: APP_FULL_BASE_URL
+              value: https://passbolt.example.com
+            - name: DATASOURCES_DEFAULT_HOST
+              value: passbolt-db.data.svc.cluster.local
+            - name: DATASOURCES_DEFAULT_DATABASE
+              value: passbolt
+            - name: DATASOURCES_DEFAULT_USERNAME
+              value: passbolt
+            - name: DATASOURCES_DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: passbolt-secret
+                  key: PASSBOLT_DB_PASSWORD
+          volumeMounts:
+            # Persist only generated cryptographic material. Mounting a PVC over
+            # /etc/passbolt would hide the configuration shipped in the image.
+            - name: gpg
+              mountPath: /etc/passbolt/gpg
+            - name: jwt
+              mountPath: /etc/passbolt/jwt
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthcheck/status.json
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          livenessProbe:
+            httpGet:
+              path: /healthcheck/status.json
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+      volumes:
+        - name: gpg
+          persistentVolumeClaim:
+            claimName: passbolt-gpg
+        - name: jwt
+          persistentVolumeClaim:
+            claimName: passbolt-jwt
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: passbolt
+  namespace: apps
+spec:
+  selector:
+    app.kubernetes.io/name: passbolt
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: passbolt
+  namespace: apps
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    nginx.ingress.kubernetes.io/whitelist-source-range: 203.0.113.10/32
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - passbolt.example.com
+      secretName: passbolt-tls
+  rules:
+    - host: passbolt.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: passbolt
+                port:
+                  name: http

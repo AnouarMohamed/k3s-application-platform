@@ -1,0 +1,258 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: glpi-db
+  namespace: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glpi-db
+  namespace: data
+  labels:
+    app.kubernetes.io/name: glpi-db
+    app.kubernetes.io/part-of: k3s-application-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glpi-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glpi-db
+        app.kubernetes.io/part-of: k3s-application-platform
+    spec:
+      serviceAccountName: glpi-db
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mariadb
+          image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: mysql
+              containerPort: 3306
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: MARIADB_DATABASE
+              value: glpi
+            - name: MARIADB_USER
+              value: glpi
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glpi-secret
+                  key: GLPI_DB_PASSWORD
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glpi-secret
+                  key: GLPI_DB_ROOT_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 90
+            periodSeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: glpi-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glpi-db
+  namespace: data
+spec:
+  selector:
+    app.kubernetes.io/name: glpi-db
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: glpi-data
+  namespace: apps
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glpi
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: glpi
+    app.kubernetes.io/part-of: k3s-application-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glpi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glpi
+        app.kubernetes.io/part-of: k3s-application-platform
+    spec:
+      serviceAccountName: glpi
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: glpi
+          image: glpi/glpi:11.0.7@sha256:ea6bac349d6ffea208be84432a9bb70f23d8b0c6c29a12c15bbeb5f5698a17c1
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 80
+              name: http
+          # resources: Defines standard allocation for a PHP/Web application.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            # The official GLPI image can initialize itself non-interactively
+            # when these database variables are provided.
+            - name: GLPI_DB_HOST
+              value: glpi-db.data.svc.cluster.local
+            - name: GLPI_DB_PORT
+              value: "3306"
+            - name: GLPI_DB_NAME
+              value: glpi
+            - name: GLPI_DB_USER
+              value: glpi
+            - name: GLPI_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glpi-secret
+                  key: GLPI_DB_PASSWORD
+          volumeMounts:
+            - name: data
+              # GLPI 11 keeps configuration, files, marketplace data and logs
+              # below /var/glpi; the application code itself stays in the image.
+              mountPath: /var/glpi
+            - name: tmp
+              mountPath: /tmp
+          # readinessProbe: Ensures GLPI is serving the login page/dashboard.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          # livenessProbe: Restarts GLPI if the web service hangs.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: glpi-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glpi
+  namespace: apps
+spec:
+  selector:
+    app.kubernetes.io/name: glpi
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: glpi
+  namespace: apps
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    nginx.ingress.kubernetes.io/whitelist-source-range: 203.0.113.10/32
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - glpi.example.com
+      secretName: glpi-tls
+  rules:
+    - host: glpi.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: glpi
+                port:
+                  name: http

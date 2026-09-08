@@ -1,0 +1,30 @@
+# Platform Global Settings
+# This ConfigMap serves as the "Source of Truth" for environmental configuration.
+# Values defined here are injected into other resources via Kustomize replacements.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-settings
+  namespace: ops
+data:
+  # Default to staging for safe first applies. Change to letsencrypt-production before real cutover.
+  # The strict production check requires letsencrypt-production before cutover.
+  clusterIssuer: letsencrypt-staging
+  
+  # Admin email for Let's Encrypt registration and notifications.
+  letsencryptEmail: admin@example.com
+  
+  # Hostnames for all platform services.
+  wordpressHost: wp.example.com
+  jenkinsHost: jenkins.example.com
+  glpiHost: glpi.example.com
+  supersetHost: bi.example.com
+  passboltHost: passbolt.example.com
+  
+  # Full base URL required by Passbolt application logic.
+  passboltBaseUrl: https://passbolt.example.com
+  
+  portainerHost: portainer.example.com
+
+  # Public admin surfaces are restricted to this CIDR by ingress-nginx.
+  adminWhitelistSourceRange: 203.0.113.10/32

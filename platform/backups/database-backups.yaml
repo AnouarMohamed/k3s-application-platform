@@ -1,0 +1,281 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-wordpress-db
+  namespace: apps
+spec:
+  schedule: "17 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: backup-wordpress-db
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: create-backup-user
+              image: mysql:8.4.9@sha256:c36050afdca850f23cef85703f84c7531a5ae155a11b5ee1c60acb09937c4084
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  escaped_password="$(printf '%s' "${WORDPRESS_BACKUP_PASSWORD}" | sed "s/'/''/g")"
+                  mysql -h wordpress-db.data.svc.cluster.local -u root <<SQL
+                  CREATE USER IF NOT EXISTS 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  ALTER USER 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER ON wordpress.* TO 'backup'@'%';
+                  FLUSH PRIVILEGES;
+                  SQL
+              env:
+                - name: MYSQL_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: wordpress-demo-secret
+                      key: MYSQL_ROOT_PASSWORD
+                - name: WORDPRESS_BACKUP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: wordpress-demo-secret
+                      key: WORDPRESS_BACKUP_PASSWORD
+            - name: dump
+              image: mysql:8.4.9@sha256:c36050afdca850f23cef85703f84c7531a5ae155a11b5ee1c60acb09937c4084
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  mysqldump --single-transaction --routines --events --triggers --no-tablespaces \
+                    -h wordpress-db.data.svc.cluster.local -u backup wordpress > "/backup/wordpress-${ts}.sql"
+              env:
+                - name: MYSQL_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: wordpress-demo-secret
+                      key: WORDPRESS_BACKUP_PASSWORD
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+          containers:
+            - name: restic
+              image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  restic snapshots || restic init
+                  restic backup /backup --tag wordpress-db
+                  restic forget --tag wordpress-db --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+              envFrom:
+                - secretRef:
+                    name: backup-s3-secret
+              env:
+                - name: RESTIC_CACHE_DIR
+                  value: /cache
+              securityContext:
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+                  readOnly: true
+                - name: cache
+                  mountPath: /cache
+          volumes:
+            - name: dump
+              emptyDir: {}
+            - name: cache
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-glpi-db
+  namespace: apps
+spec:
+  schedule: "32 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: backup-glpi-db
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: create-backup-user
+              image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  escaped_password="$(printf '%s' "${GLPI_BACKUP_PASSWORD}" | sed "s/'/''/g")"
+                  mariadb -h glpi-db.data.svc.cluster.local -u root <<SQL
+                  CREATE USER IF NOT EXISTS 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  ALTER USER 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER ON glpi.* TO 'backup'@'%';
+                  FLUSH PRIVILEGES;
+                  SQL
+              env:
+                - name: MARIADB_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: glpi-secret
+                      key: GLPI_DB_ROOT_PASSWORD
+                - name: GLPI_BACKUP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: glpi-secret
+                      key: GLPI_BACKUP_PASSWORD
+            - name: dump
+              image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  mariadb-dump --single-transaction --routines --events --triggers \
+                    -h glpi-db.data.svc.cluster.local -u backup glpi > "/backup/glpi-${ts}.sql"
+              env:
+                - name: MARIADB_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: glpi-secret
+                      key: GLPI_BACKUP_PASSWORD
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+          containers:
+            - name: restic
+              image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  restic snapshots || restic init
+                  restic backup /backup --tag glpi-db
+                  restic forget --tag glpi-db --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+              envFrom:
+                - secretRef:
+                    name: backup-s3-secret
+              env:
+                - name: RESTIC_CACHE_DIR
+                  value: /cache
+              securityContext:
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+                  readOnly: true
+                - name: cache
+                  mountPath: /cache
+          volumes:
+            - name: dump
+              emptyDir: {}
+            - name: cache
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-passbolt-db
+  namespace: apps
+spec:
+  schedule: "47 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: backup-passbolt-db
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: create-backup-user
+              image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  escaped_password="$(printf '%s' "${PASSBOLT_BACKUP_PASSWORD}" | sed "s/'/''/g")"
+                  mariadb -h passbolt-db.data.svc.cluster.local -u root <<SQL
+                  CREATE USER IF NOT EXISTS 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  ALTER USER 'backup'@'%' IDENTIFIED BY '${escaped_password}';
+                  GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER ON passbolt.* TO 'backup'@'%';
+                  FLUSH PRIVILEGES;
+                  SQL
+              env:
+                - name: MARIADB_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: passbolt-secret
+                      key: PASSBOLT_DB_ROOT_PASSWORD
+                - name: PASSBOLT_BACKUP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: passbolt-secret
+                      key: PASSBOLT_BACKUP_PASSWORD
+            - name: dump
+              image: mariadb:10.11.18@sha256:161be354206906ea8584929bde5ac59cdce0770fbfd5dd76131429f7dd80aab5
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  mariadb-dump --single-transaction --routines --events --triggers \
+                    -h passbolt-db.data.svc.cluster.local -u backup passbolt > "/backup/passbolt-${ts}.sql"
+              env:
+                - name: MARIADB_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: passbolt-secret
+                      key: PASSBOLT_BACKUP_PASSWORD
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+          containers:
+            - name: restic
+              image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  restic snapshots || restic init
+                  restic backup /backup --tag passbolt-db
+                  restic forget --tag passbolt-db --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+              envFrom:
+                - secretRef:
+                    name: backup-s3-secret
+              env:
+                - name: RESTIC_CACHE_DIR
+                  value: /cache
+              securityContext:
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+                  readOnly: true
+                - name: cache
+                  mountPath: /cache
+          volumes:
+            - name: dump
+              emptyDir: {}
+            - name: cache
+              emptyDir: {}
